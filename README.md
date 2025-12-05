@@ -32,4 +32,9 @@ Create an animated GIF from a YouTube video segment with optional subtitles.
     yt2gif.sh -f 20 -w 640 https://youtu.be/example 00:00:10 00:00:15 output.gif
     yt2gif.sh --no-subs https://youtu.be/example 1:30 1:45 output.gif
     yt2gif.sh -t "Hello World!" https://youtu.be/example 5 10 output.gif
-    
+
+## Run Test
+
+```
+./test_yt2gif.sh [--verbose]
+```

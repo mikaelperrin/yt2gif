@@ -172,28 +172,34 @@ EOF
 download_subtitles() {
     local url="$1"
     local output="$2"
-    local subtitle_output="${output}.en.srt"
+    local subtitle_output=""
 
     log "Downloading subtitles..."
 
     # Try manual CC first (higher quality)
-    yt-dlp --write-sub --sub-lang en --skip-download \
-        --convert-subs srt --quiet "$url" -o "$output" 2>/dev/null || true
+    yt-dlp --write-sub --skip-download --convert-subs srt --quiet "$url" -o "$output" 2>/dev/null || true
 
-    if [ -f "$subtitle_output" ] && [ -s "$subtitle_output" ]; then
-        log "Found manual CC subtitles"
-        return 0
-    fi
+    # Check for any .srt file
+    for srt_file in "$output"*.srt; do
+        if [ -f "$srt_file" ] && [ -s "$srt_file" ]; then
+            subtitle_output="$srt_file"
+            log "Found manual CC subtitles: $srt_file"
+            return 0
+        fi
+    done
 
     # Fall back to auto-generated
     log "Manual CC not found, trying auto-generated..."
-    yt-dlp --write-auto-sub --sub-lang en --skip-download \
-        --convert-subs srt --quiet "$url" -o "$output" 2>/dev/null || true
+    yt-dlp --write-auto-sub --skip-download --convert-subs srt --quiet "$url" -o "$output" 2>/dev/null || true
 
-    if [ -f "$subtitle_output" ] && [ -s "$subtitle_output" ]; then
-        log "Found auto-generated subtitles"
-        return 0
-    fi
+    # Check again for any .srt file
+    for srt_file in "$output"*.srt; do
+        if [ -f "$srt_file" ] && [ -s "$srt_file" ]; then
+            subtitle_output="$srt_file"
+            log "Found auto-generated subtitles: $srt_file"
+            return 0
+        fi
+    done
 
     log "No subtitles available for this video"
     return 1
@@ -313,13 +319,17 @@ main() {
         subtitle_file="$TEMP_DIR/manual.srt"
     elif [ "$skip_subs" = false ]; then
         # Download subtitles from YouTube
-        download_subtitles "$youtube_url" "$TEMP_DIR/video"
-        # yt-dlp appends .en.srt to the filename
-        if [ -f "$TEMP_DIR/video.en.srt" ] && [ -s "$TEMP_DIR/video.en.srt" ]; then
-            subtitle_file="$TEMP_DIR/video.en.srt"
-            log "Subtitle file ready: $subtitle_file ($(wc -l < "$subtitle_file") lines)"
+        if download_subtitles "$youtube_url" "$TEMP_DIR/video"; then
+            # Find the first available .srt file
+            for srt_file in "$TEMP_DIR/video"*.srt; do
+                if [ -f "$srt_file" ] && [ -s "$srt_file" ]; then
+                    subtitle_file="$srt_file"
+                    log "Subtitle file ready: $subtitle_file ($(wc -l < "$srt_file") lines)"
+                    break
+                fi
+            done
         else
-            log "No subtitle file found at expected location"
+            log "No subtitle file found"
         fi
     fi
 
