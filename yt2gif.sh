@@ -112,6 +112,16 @@ time_to_seconds() {
     echo "$seconds"
 }
 
+seconds_to_srt_time() {
+    local total_seconds="$1"
+    local hours=$((total_seconds / 3600))
+    local minutes=$(((total_seconds % 3600) / 60))
+    local seconds=$((total_seconds % 60))
+    local milliseconds=$(echo "$total_seconds" | awk '{printf "%03d", ($1 - int($1)) * 1000}')
+    
+    printf "%02d:%02d:%02d,%s" "$hours" "$minutes" "$seconds" "$milliseconds"
+}
+
 validate_time_range() {
     local start="$1"
     local end="$2"
@@ -155,18 +165,81 @@ create_manual_subtitle() {
     local end="$3"
     local output="$4"
 
-    # For manual subtitles, we want them to show from 0:00:00 (relative to the clipped segment)
-    # Create SRT file with subtitle appearing at the beginning
+    local start_sec=$(time_to_seconds "$start")
+    local end_sec=$(time_to_seconds "$end")
+    local duration=$((end_sec - start_sec))
+    
+    # Create subtitle that spans the entire clip duration
+    local end_time=$(seconds_to_srt_time "$duration")
+    
     cat > "$output" << EOF
 1
-00:00:00,000 --> 00:01:00,000
+00:00:00,000 --> $end_time
 $text
 
 EOF
 
-    log "Created manual subtitle: \"$text\""
-    log "Subtitle file contents:"
-    cat "$output" >&2
+    log "Created manual subtitle: \"$text\" (duration: ${duration}s)"
+}
+
+adjust_subtitle_timing() {
+    local input_srt="$1"
+    local output_srt="$2"
+    local start_offset="$3"
+    
+    local offset_seconds=$(time_to_seconds "$start_offset")
+    
+    log "Adjusting subtitle timing (offset: -${offset_seconds}s)..."
+    
+    awk -v offset="$offset_seconds" '
+    function time_to_ms(time) {
+        split(time, parts, /[:,]/)
+        hours = parts[1]
+        minutes = parts[2]
+        seconds = parts[3]
+        ms = parts[4]
+        return (hours * 3600 + minutes * 60 + seconds) * 1000 + ms
+    }
+    
+    function ms_to_time(ms) {
+        if (ms < 0) ms = 0
+        hours = int(ms / 3600000)
+        ms = ms % 3600000
+        minutes = int(ms / 60000)
+        ms = ms % 60000
+        seconds = int(ms / 1000)
+        milliseconds = ms % 1000
+        return sprintf("%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds)
+    }
+    
+    /^[0-9]/ && /-->/ {
+        split($0, times, / --> /)
+        start_ms = time_to_ms(times[1])
+        end_ms = time_to_ms(times[2])
+        
+        # Adjust by offset
+        start_ms -= offset * 1000
+        end_ms -= offset * 1000
+        
+        # Skip subtitles that are completely before the clip
+        if (end_ms <= 0) {
+            skip = 1
+            next
+        }
+        
+        # Adjust start time if it begins before the clip
+        if (start_ms < 0) start_ms = 0
+        
+        skip = 0
+        print ms_to_time(start_ms) " --> " ms_to_time(end_ms)
+        next
+    }
+    
+    !skip { print }
+    ' "$input_srt" > "$output_srt"
+    
+    local line_count=$(wc -l < "$output_srt")
+    log "Adjusted subtitle file created: $output_srt ($line_count lines)"
 }
 
 download_subtitles() {
@@ -222,9 +295,12 @@ create_gif() {
 
     if [ -n "$subtitle_file" ] && [ -f "$subtitle_file" ]; then
         log "Embedding subtitles from: $subtitle_file"
-        # Use ass/ssa format for better control - subtitles filter needs careful escaping
-        # We'll apply subtitles AFTER extracting the segment
-        filter_complex="[0:v]fps=${fps},scale=${width}:-1:flags=lanczos,subtitles='${subtitle_file}':force_style='Fontsize=${subtitle_size},PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,Outline=2,BackColour=&H80000000&,BorderStyle=4,MarginV=20'[scaled];"
+        # Escape the subtitle file path for ffmpeg
+        local escaped_srt="${subtitle_file//\\/\\\\}"
+        escaped_srt="${escaped_srt//:/\\:}"
+        escaped_srt="${escaped_srt//\'/\\\'}"
+        
+        filter_complex="[0:v]fps=${fps},scale=${width}:-1:flags=lanczos,subtitles='${escaped_srt}':force_style='Fontsize=${subtitle_size},PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,Outline=2,BackColour=&H80000000&,BorderStyle=4,MarginV=20'[scaled];"
         filter_complex+="[scaled]split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5"
     else
         log "No subtitles found, creating GIF without them..."
@@ -323,8 +399,11 @@ main() {
             # Find the first available .srt file
             for srt_file in "$TEMP_DIR/video"*.srt; do
                 if [ -f "$srt_file" ] && [ -s "$srt_file" ]; then
-                    subtitle_file="$srt_file"
-                    log "Subtitle file ready: $subtitle_file ($(wc -l < "$srt_file") lines)"
+                    # Adjust subtitle timing to match the clip
+                    local adjusted_srt="$TEMP_DIR/adjusted.srt"
+                    adjust_subtitle_timing "$srt_file" "$adjusted_srt" "$start_time"
+                    subtitle_file="$adjusted_srt"
+                    log "Subtitle timing adjusted for clip starting at $start_time"
                     break
                 fi
             done
